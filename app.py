@@ -3,23 +3,11 @@ import cv2
 import numpy as np
 import tensorflow as tf
 import os
+from PIL import Image
 import pandas as pd
 from collections import deque
 
 st.set_page_config(page_title="Face Expression Detection", page_icon="🧠", layout="wide")
-
-st.markdown("""
-<style>
-    .emotion-box {
-        font-size: 24px;
-        padding: 10px;
-        background-color: #f2f2f2;
-        border-radius: 10px;
-        text-align: center;
-        font-weight: bold;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 @st.cache_resource
 def load_model_and_resources():
@@ -30,117 +18,58 @@ def load_model_and_resources():
 
     try:
         model = tf.keras.models.load_model(model_path)
-        input_shape = model.input_shape
-
         face_cascade = cv2.CascadeClassifier(
             cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
         )
-
-        return model, face_cascade, "Model Loaded", input_shape
+        return model, face_cascade, "Model Loaded", model.input_shape
     except Exception as e:
         return None, None, str(e), None
 
 
 model, face_cascade, status_msg, model_input_shape = load_model_and_resources()
 
-
 class_names = ['Angry 😠', 'Fear 😨', 'Happy 😄', 'Neutral 😐', 'Sad 😢', 'Surprise 😲']
 
-prediction_buffer = deque(maxlen=5)
-
-def preprocess_image(face_roi, target_shape):
-    target_h, target_w = target_shape[1], target_shape[2]
-    target_channels = target_shape[3]
-
-    resized = cv2.resize(face_roi, (target_w, target_h))
-
-    if target_channels == 1:
-        resized = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-        resized = np.expand_dims(resized, axis=-1)
-    else:
-        if len(resized.shape) == 2:
-            resized = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
-
-    resized = resized.astype("float32") / 255.0
-    return np.expand_dims(resized, axis=0)
-
+st.title("🧠 Face Expression Detection (Camera Input Version)")
 
 st.sidebar.header("⚙️ Pengaturan")
-
-run_camera = st.sidebar.toggle("Nyalakan Kamera", value=False)
-
-st.sidebar.info("Model digunakan: **model.keras**")
 st.sidebar.success(status_msg)
 
-st.title("🧠 Face Expression Detection Real-Time")
+picture = st.camera_input("📸 Ambil gambar wajah menggunakan kamera")
 
-col1, col2 = st.columns([2, 1])
+if picture is not None:
+    img = Image.open(picture)
+    img = np.array(img)
 
-FRAME_WINDOW = col1.image([], use_column_width=True)
-emotion_box = col2.empty()
-chart_box = col2.empty()
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
 
-if run_camera:
-
-    camera = cv2.VideoCapture(0)
-
-    while run_camera:
-        ret, frame = camera.read()
-        if not ret:
-            break
-
-        frame = cv2.flip(frame, 1)
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray_frame, 1.1, 5)
-
-        final_prediction = None
-
+    if len(faces) == 0:
+        st.warning("Tidak ada wajah terdeteksi!")
+    else:
         for (x, y, w, h) in faces:
-            face_roi = frame[y:y+h, x:x+w]
+            face_roi = img[y:y+h, x:x+w]
 
-            try:
-                processed = preprocess_image(face_roi, model_input_shape)
-                prediction = model.predict(processed, verbose=0)[0]
+            # Preprocess
+            target_h, target_w = model_input_shape[1], model_input_shape[2]
 
-                prediction_buffer.append(prediction)
-                smooth_pred = np.mean(prediction_buffer, axis=0)
+            face_resized = cv2.resize(face_roi, (target_w, target_h))
+            face_resized = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY)
+            face_resized = face_resized.astype("float32") / 255.0
+            face_resized = np.expand_dims(face_resized, axis=-1)
+            face_resized = np.expand_dims(face_resized, axis=0)
 
-                idx = np.argmax(smooth_pred)
-                final_prediction = (class_names[idx], smooth_pred[idx] * 100, smooth_pred)
+            prediction = model.predict(face_resized)[0]
+            idx = np.argmax(prediction)
+            prob = prediction[idx] * 100
 
-                # Bounding box
-                color = (0, 255, 0) if idx not in [0, 4] else (0, 0, 255)
-                cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-                cv2.putText(
-    frame, f"{class_names[idx]} {smooth_pred[idx] * 100:.1f}%",
-    (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2
-)
-
-            except:
-                pass
-
-        if final_prediction:
-            label, prob, full_pred = final_prediction
-
-            emotion_box.markdown(
-                f"<div class='emotion-box'>Dominan: {label}<br>({prob:.1f}%)</div>",
-                unsafe_allow_html=True
-            )
+            st.subheader(f"Ekspresi Terdeteksi: **{class_names[idx]}** ({prob:.2f}%)")
 
             df = pd.DataFrame({
                 "Emosi": class_names,
-                "Confidence (%)": full_pred * 100
+                "Confidence (%)": prediction * 100
             })
-            chart_box.write(df.style.format({"Confidence (%)": "{:.2f}%"}))
 
-        else:
-            emotion_box.markdown(
-                "<div class='emotion-box'>Menunggu wajah...</div>",
-                unsafe_allow_html=True
-            )
-            chart_box.empty()
-    
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        FRAME_WINDOW.image(frame_rgb, use_column_width=True)
+            st.bar_chart(df.set_index("Emosi"))
 
-    camera.release()
+    st.image(img, caption="Gambar yang diambil", use_column_width=True)
